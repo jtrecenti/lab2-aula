@@ -1,0 +1,750 @@
+---
+title: "De tidymodels para scikit-learn"
+subtitle: "Lab 2: Prática Avançada em Data Science e Visualização, PADS Insper"
+author: "Julio Trecenti"
+format:
+  revealjs:
+    theme: [default, assets/insper-theme.scss]
+    logo: assets/logo-insper-branco.png
+    footer: "Lab 2: pipelines com scikit-learn"
+    slide-number: true
+    transition: fade
+    width: 1280
+    height: 720
+    highlight-style: monokai
+    smaller: true
+    scrollable: true
+    code-line-numbers: false
+lang: pt-BR
+---
+
+## Vocês já sabem modelar
+
+No R, vocês montaram fluxos assim:
+
+```r
+recipe(...) |> step_...() -> workflow() -> tune_grid() -> last_fit()
+```
+
+O scikit-learn faz **as mesmas cinco coisas**, com outros nomes:
+
+::: {.incremental}
+- dividir dados de um jeito honesto
+- descrever o pré-processamento sem executá-lo
+- descrever o modelo sem executá-lo
+- colar os dois num objeto só
+- reamostrar, ajustar hiperparâmetro e medir
+:::
+
+. . .
+
+Hoje é **tradução**, não conteúdo novo. Quem entendeu `workflow()` já entendeu
+`Pipeline`.
+
+---
+
+## O mapa
+
+| tidymodels (R) | scikit-learn (Python) |
+| --- | --- |
+| `rsample` | `sklearn.model_selection` |
+| `recipes` | `ColumnTransformer` + transformadores |
+| `parsnip` | os estimadores (`Lasso`, `RandomForestRegressor`, ...) |
+| `workflows` | `Pipeline` |
+| `tune` | `GridSearchCV`, `RandomizedSearchCV` |
+| `yardstick` | `sklearn.metrics` |
+| `bundle` / `vetiver` | `joblib.dump` |
+
+. . .
+
+Diferença de forma: no R são **oito pacotes** que conversam pelo `tidymodels`.
+Em Python é **uma biblioteca** com submódulos.
+
+---
+
+## O problema de hoje
+
+::: {.columns}
+::: {.column width="58%"}
+**Quanta oferta de ônibus a SPTrans coloca em cada linha, em cada hora?**
+
+Alvo: **headway**, o intervalo programado entre dois ônibus, em segundos.
+
+- 37.357 registros
+- 1.142 linhas de ônibus
+- 11 variáveis numéricas, 6 categóricas
+- fonte: GTFS da SPTrans cruzado com a API Olho Vivo
+:::
+
+::: {.column width="42%"}
+| um registro | |
+| --- | --- |
+| linha | 8000-10 |
+| sentido | ida |
+| faixa | 07h |
+| extensão | 14,3 km |
+| paradas | 42 |
+| corredor | não |
+| **headway** | **720 s** |
+:::
+:::
+
+. . .
+
+Tudo o que vem a seguir está nos dois documentos irmãos, `tidymodels.qmd` e
+`sklearn.qmd`: mesmo dado, mesmos modelos, duas sintaxes.
+
+---
+
+## Dois modelos, escolhidos de propósito
+
+::: {.columns}
+::: {.column width="50%"}
+### Lasso
+Regressão linear com penalização L1.
+
+- **precisa** de padronização
+- **zera** coeficiente, então também seleciona variável
+- interpretável
+- um hiperparâmetro: a penalidade
+:::
+
+::: {.column width="50%"}
+### Floresta aleatória
+Muitas árvores, cada uma numa amostra.
+
+- **não precisa** de padronização
+- captura não linearidade e interação
+- caixa mais fechada
+- sobreajusta com facilidade
+:::
+:::
+
+. . .
+
+Eles cobrem os dois extremos do pré-processamento. Se o seu `Pipeline` serve
+para os dois **sem mudar a receita**, ele está bem construído.
+
+---
+
+## Diferença de filosofia (a que mais confunde)
+
+::: {.columns}
+::: {.column width="50%"}
+### tidymodels
+A receita conhece **papéis**:
+
+```r
+step_dummy(all_nominal_predictors())
+step_normalize(all_numeric_predictors())
+```
+
+Você diz *o que é a variável*.
+:::
+
+::: {.column width="50%"}
+### scikit-learn
+O `ColumnTransformer` conhece **colunas**:
+
+```python
+ColumnTransformer([
+  ("num", caminho_num, numericas),
+  ("cat", caminho_cat, categoricas),
+])
+```
+
+Você diz *quais colunas*.
+:::
+:::
+
+. . .
+
+Dá para chegar perto do R com `make_column_selector`:
+
+```python
+from sklearn.compose import make_column_selector as selecionar
+("num", caminho_num, selecionar(dtype_include="number"))
+```
+
+. . .
+
+Na prática, **listar as colunas explicitamente é melhor**: a lista vira
+documentação do modelo, e você percebe na hora quando uma coluna nova apareceu.
+
+---
+
+## Passo 1: dividir por grupo
+
+Cada linha de ônibus aparece cerca de 30 vezes, uma por faixa horária. Se a
+mesma linha cair nos dois lados, o modelo **decora a linha**.
+
+::: {.columns}
+::: {.column width="50%"}
+```r
+divisao <- group_initial_split(
+  dados,
+  group = route_id,
+  prop = 0.75
+)
+
+treino <- training(divisao)
+teste  <- testing(divisao)
+
+dobras <- group_vfold_cv(
+  treino, group = route_id, v = 5
+)
+```
+:::
+
+::: {.column width="50%"}
+```python
+# train_test_split NAO tem groups=,
+# entao sorteamos as LINHAS, nao os registros
+linhas = dados["route_id"].unique()
+linhas_treino, _ = train_test_split(
+    linhas, test_size=0.25, random_state=42
+)
+
+e_treino = dados["route_id"].isin(linhas_treino)
+treino, teste = dados[e_treino], dados[~e_treino]
+
+GroupKFold(n_splits=5)
+```
+:::
+:::
+
+. . .
+
+A forma canônica seria `GroupShuffleSplit`, mas ele é um **validador cruzado**:
+o `.split()` devolve um gerador de índices, e é preciso `next()` para pegar a
+primeira divisão. Dá **exatamente o mesmo resultado**; a versão acima é só mais
+fácil de ler. Na validação cruzada não tem escapatória: ali é `GroupKFold`.
+
+. . .
+
+No R o `route_id` viaja **dentro** do `data.frame`. Em Python o vetor `groups`
+viaja **por fora**, e precisa ser passado em toda chamada. Esquecer o `groups=`
+no `.fit()` da busca é o erro número um.
+
+---
+
+## Passo 2: a receita, inteira
+
+::: {.columns}
+::: {.column width="47%"}
+```r
+receita <- recipe(
+    headway_seg ~ ., data = treino
+  ) |>
+  update_role(route_id, new_role = "id") |>
+  step_impute_median(
+    all_numeric_predictors()) |>
+  step_normalize(
+    all_numeric_predictors()) |>
+  step_unknown(
+    all_nominal_predictors()) |>
+  step_novel(
+    all_nominal_predictors()) |>
+  step_other(
+    all_nominal_predictors(),
+    threshold = 0.005) |>
+  step_dummy(
+    all_nominal_predictors()) |>
+  step_zv(all_predictors())
+```
+:::
+
+::: {.column width="53%"}
+```python
+num = Pipeline([
+    ("imputar", SimpleImputer(strategy="median")),
+    ("padronizar", StandardScaler()),
+])
+
+cat = Pipeline([
+    ("imputar", SimpleImputer(
+        strategy="constant",
+        fill_value="desconhecido")),
+    ("onehot", OneHotEncoder(
+        handle_unknown="infrequent_if_exist",
+        min_frequency=20,
+        sparse_output=False)),
+])
+
+receita = ColumnTransformer([
+    ("num", num, numericas),
+    ("cat", cat, categoricas),
+])
+```
+:::
+:::
+
+---
+
+## Passo 2b: de-para dos `step_*`
+
+| `recipes` | `scikit-learn` |
+| --- | --- |
+| `step_impute_median()` | `SimpleImputer(strategy="median")` |
+| `step_impute_knn()` | `KNNImputer()` |
+| `step_unknown()` | `SimpleImputer(strategy="constant", fill_value=...)` |
+| `step_normalize()` | `StandardScaler()` |
+| `step_range()` | `MinMaxScaler()` |
+| `step_dummy()` | `OneHotEncoder()` |
+| `step_other()` | `OneHotEncoder(min_frequency=...)` |
+| `step_novel()` | `OneHotEncoder(handle_unknown="infrequent_if_exist")` |
+| `step_zv()` | `VarianceThreshold()` |
+| `step_log()` no *outcome* | `TransformedTargetRegressor(func=np.log, ...)` |
+| `step_poly()` | `PolynomialFeatures()` |
+| `step_pca()` | `PCA()` |
+| `step_corr()` | não tem pronto (escrever à mão) |
+
+---
+
+## Passo 2c: três armadilhas da receita
+
+A mesma receita, no mesmo dado, termina com **44 colunas no R** e **62 no
+Python**. Duas causas somadas:
+
+::: {.incremental}
+1. **`step_dummy()` cria k menos 1 colunas**, deixando um nível de referência;
+   o `OneHotEncoder` cria as k. Isso explica **6** colunas, uma por variável
+   categórica. Para lasso e floresta muda pouco; para interpretar coeficiente,
+   muda tudo.
+2. **A régua para categoria rara é outra.** O `step_other()` corta por
+   **proporção** (`threshold = 0.005`, ou seja 139 dos 27.768 registros de
+   treino); o `min_frequency` corta por **contagem** (20 registros). O corte do
+   R é sete vezes mais agressivo, e sozinho explica as outras **12** colunas.
+3. **Ordem importa no R**: `step_normalize()` tem que vir **antes** de
+   `step_dummy()`, senão ele padroniza as dummies. Em Python o problema não
+   existe, porque cada caminho recebe a sua própria lista de colunas.
+:::
+
+. . .
+
+::: {.callout-warning}
+E a regra que vale nas duas: **`fit` e `prep` só no treino**. Rodar
+`fit_transform` na base inteira antes de dividir é o vazamento mais comum de
+todos.
+:::
+
+---
+
+## Passo 2d: de onde vêm as 18 colunas de diferença
+
+| variável | níveis | Python (`min_frequency=20`) | R (`step_other` + `step_dummy`) |
+| --- | --- | --- | --- |
+| `periodo_dia` | 5 | 5 | 4 |
+| `tipo_dia` | 4 | 4 | 3 |
+| `sentido` | 2 | 2 | 1 |
+| `area_operacao` | 12 | 12 | 11 |
+| `tipo_linha` | 20 | 20 | **7** |
+| `corredor_principal` | 8 | 8 | 7 |
+| **colunas categóricas** | | **51** | **33** |
+| mais 11 numéricas | | **62** | **44** |
+
+. . .
+
+Quase tudo está em **uma** variável: `tipo_linha` tem 20 níveis, e 13 deles têm
+menos de 139 registros. O R junta os 13 num `other`; o Python mantém todos os
+que passam de 20 registros.
+
+. . .
+
+Nenhum dos dois está errado. O que seria errado é **não saber** que a sua
+receita jogou treze categorias numa só.
+
+---
+
+## Passo 3: o lasso
+
+::: {.columns}
+::: {.column width="50%"}
+```r
+especificacao_lasso <- linear_reg(
+    penalty = tune(),
+    mixture = 1
+  ) |>
+  set_engine("glmnet") |>
+  set_mode("regression")
+```
+
+`mixture = 1` é lasso, `0` é ridge,
+entre 0 e 1 é elastic net.
+:::
+
+::: {.column width="50%"}
+```python
+from sklearn.linear_model import Lasso
+
+modelo_lasso = Lasso(
+    random_state=42,
+    max_iter=10_000,
+)
+```
+
+São **três classes diferentes**:
+`Lasso`, `Ridge`, `ElasticNet`.
+:::
+:::
+
+. . .
+
+| tarefa | tidymodels | scikit-learn |
+| --- | --- | --- |
+| lasso, ridge, elastic net | `linear_reg(penalty, mixture)` | `Lasso()`, `Ridge()`, `ElasticNet()` |
+| floresta | `rand_forest(trees, min_n)` | `RandomForestRegressor(n_estimators, min_samples_leaf)` |
+| boosting | `boost_tree()` | `HistGradientBoostingRegressor()` |
+| árvore | `decision_tree()` | `DecisionTreeRegressor()` |
+| baseline | `null_model()` | `DummyRegressor()` |
+
+O `parsnip` **padroniza** o nome do hiperparâmetro entre motores; o
+scikit-learn usa o nome de cada implementação. É a parte mais chata da tradução.
+
+---
+
+## Passo 4: `workflow` = `Pipeline`
+
+::: {.columns}
+::: {.column width="50%"}
+```r
+fluxo_lasso <- workflow() |>
+  add_recipe(receita) |>
+  add_model(especificacao_lasso)
+```
+:::
+
+::: {.column width="50%"}
+```python
+fluxo_lasso = Pipeline([
+    ("receita", receita),
+    ("modelo", modelo_lasso),
+])
+```
+:::
+:::
+
+. . .
+
+::: {.callout-important}
+## É por isso que este slide existe
+
+O `Pipeline` não é açúcar sintático. Ele é o que garante que a receita seja
+**reajustada dentro de cada dobra** da validação cruzada, e o que faz o modelo
+salvo receber dado cru em produção.
+:::
+
+---
+
+## Passo 5: ajustar a penalidade
+
+::: {.columns}
+::: {.column width="50%"}
+```r
+grade <- tibble(
+  penalty = c(0.1, 1, 10, 100)
+)
+
+resultado <- tune_grid(
+  fluxo_lasso,
+  resamples = dobras,
+  grid = grade,
+  metrics = metric_set(mae, rmse, rsq_trad)
+)
+
+melhor <- select_best(
+  resultado, metric = "mae"
+)
+```
+:::
+
+::: {.column width="50%"}
+```python
+busca_lasso = GridSearchCV(
+    fluxo_lasso,
+    param_grid={
+      "modelo__alpha": [0.1, 1.0, 10.0, 100.0]
+    },
+    cv=GroupKFold(n_splits=5),
+    scoring="neg_mean_absolute_error",
+    n_jobs=-1,
+)
+busca_lasso.fit(
+    X_treino, y_treino, groups=g_treino
+)
+busca_lasso.best_params_
+```
+:::
+:::
+
+. . .
+
+O `__` é o **operador de caminho**: `"modelo__alpha"` significa *o parâmetro
+`alpha` do passo chamado `modelo`*. No R o buraco é marcado por dentro, com
+`tune()`; em Python ele é apontado de fora, pelo nome.
+
+---
+
+## Passo 5b: o `__` alcança a receita também
+
+```python
+grade = {
+    "receita__num__imputar__strategy": ["median", "mean"],
+    "receita__cat__onehot__min_frequency": [10, 50],
+    "modelo__alpha": [0.1, 1.0, 10.0],
+}
+```
+
+. . .
+
+Isso ajusta **receita e modelo juntos**, na mesma validação cruzada. No
+tidymodels é o `tune()` dentro do `step_*`:
+
+```r
+step_other(all_nominal_predictors(), threshold = tune())
+```
+
+. . .
+
+Mesma ideia, sintaxe diferente. E cuidado com o tamanho: cada camada multiplica
+o número de ajustes.
+
+---
+
+## O que o lasso escolheu
+
+Com `penalty = 1` no R, os coeficientes de maior módulo:
+
+| variável | coeficiente (segundos) |
+| --- | --- |
+| `periodo_dia_madrugada` | +933 |
+| `area_operacao_M` (metrô) | -932 |
+| `tipo_dia_util_e_sabado` | +737 |
+| `n_paradas` | +343 |
+
+. . .
+
+Leitura direta: madrugada tem intervalo muito maior; linhas de metrô e trem têm
+intervalo muito menor; linha mais longa tem intervalo maior.
+
+. . .
+
+E **2 dos 44 coeficientes foram zerados** no R (21 de 62 no Python, porque a
+régua da penalidade não é a mesma nas duas implementações). O lasso é regressão
+**e** seleção de variável no mesmo passo.
+
+---
+
+## Passo 6: a floresta, trocando uma linha
+
+::: {.columns}
+::: {.column width="50%"}
+```r
+especificacao_floresta <- rand_forest(
+    trees = 200,
+    min_n = tune()
+  ) |>
+  set_engine("ranger", seed = 42) |>
+  set_mode("regression")
+
+fluxo_floresta <- workflow() |>
+  add_recipe(receita) |>     # <- a MESMA
+  add_model(especificacao_floresta)
+```
+:::
+
+::: {.column width="50%"}
+```python
+fluxo_floresta = Pipeline([
+    ("receita", receita),      # <- a MESMA
+    ("modelo", RandomForestRegressor(
+        n_estimators=200,
+        random_state=42,
+    )),
+])
+
+grade = {"modelo__min_samples_leaf": [5, 20]}
+```
+:::
+:::
+
+. . .
+
+`min_n` é `min_samples_leaf`; `trees` é `n_estimators`.
+
+. . .
+
+**A receita não mudou.** Trocar de modelo custou uma linha nos dois lados. É
+esse desacoplamento que o `Pipeline` compra.
+
+---
+
+## Passo 7: o resultado, nos dois
+
+Métricas no **teste**, em linhas que o modelo nunca viu:
+
+| modelo | MAE (R) | MAE (Python) | R² (R) | R² (Python) |
+| --- | --- | --- | --- | --- |
+| baseline (mediana) | 690 s | 667 s | -0,26 | -0,22 |
+| lasso | 589 s | 594 s | 0,28 | 0,25 |
+| **floresta** | **574 s** | **562 s** | **0,31** | **0,27** |
+
+. . .
+
+::: {.callout-note}
+Os números não batem na casa decimal porque os geradores de números aleatórios
+de R e Python são diferentes, então a divisão treino e teste não é exatamente a
+mesma. A ordem de grandeza e a conclusão são.
+:::
+
+---
+
+## Como ler essa tabela
+
+::: {.incremental}
+1. **Os dois modelos ganham do baseline**, mas por pouco: cerca de dois minutos
+   de erro médio. O gargalo não é o algoritmo, são os dados.
+2. **A floresta ganha do lasso por pouco no teste**, e por muito no treino
+   (R² 0,79 contra 0,32). Essa distância é sobreajuste.
+3. **O R² do baseline é negativo.** O R² compara com prever a *média*, e o
+   baseline prevê a *mediana*, que é o chute constante certo sob MAE. Métrica e
+   baseline precisam ser escolhidos juntos.
+4. **R² de 0,30 é o achado**, não o fracasso: a estrutura física da linha
+   explica pouco da oferta. Falta demanda, falta contrato de operação. O modelo
+   diz **quais dados faltam**.
+:::
+
+---
+
+## Cuidado com o R²
+
+::: {.callout-important}
+`yardstick::rsq()` é o **quadrado da correlação** entre observado e predito.
+Com um baseline constante, a correlação não existe e ele devolve `NA`.
+
+`sklearn.metrics.r2_score` é `1 - SQE/SQT`, que pode ficar **negativo**.
+
+O equivalente exato em R é o **`yardstick::rsq_trad()`**.
+:::
+
+. . .
+
+Se você comparar um relatório em R e um em Python e os R² não baterem, olhe aqui
+primeiro.
+
+. . .
+
+Pegadinha irmã, do lado do Python: dentro do `GridSearchCV`, `scoring` é sempre
+**"quanto maior, melhor"**. Por isso existe `neg_mean_absolute_error`, e por
+isso o `best_score_` vem negativo.
+
+---
+
+## Onde o scikit-learn não segura sua mão
+
+::: {.incremental}
+- **Não existe fórmula.** Não há `headway_seg ~ .`; você separa `X` e `y` na mão.
+- **Não existe `update_role()`.** Coluna que não é preditor simplesmente não
+  entra em `X`.
+- **Nomes de coluna somem.** A saída padrão é um array `numpy`. Use
+  `set_config(transform_output="pandas")` ou `.get_feature_names_out()`.
+- **Tipo não vem de graça.** Ler CSV devolve `"10"` e `10` misturados e o
+  `OneHotEncoder` recusa. No R, `factor` resolve.
+- **Nada estratifica nem agrupa sozinho.** `stratify=` e `groups=` precisam ser
+  passados em todo lugar, sempre.
+:::
+
+---
+
+## Salvar e servir
+
+::: {.columns}
+::: {.column width="50%"}
+```r
+library(bundle)
+
+floresta_final |>
+  bundle() |>
+  saveRDS("modelo.rds")
+
+modelo <- readRDS("modelo.rds") |>
+  unbundle()
+
+predict(modelo, head(teste))
+```
+
+O `bundle()` existe porque muitos
+modelos de R guardam ponteiros que
+não sobrevivem ao `saveRDS()`.
+:::
+
+::: {.column width="50%"}
+```python
+import joblib
+
+joblib.dump(
+    busca_floresta.best_estimator_,
+    "modelo.joblib"
+)
+
+modelo = joblib.load("modelo.joblib")
+
+modelo.predict(X_teste.head())
+```
+
+O `Pipeline` serializa inteiro,
+sem embrulho extra.
+:::
+:::
+
+. . .
+
+::: {.callout-tip}
+## O teste que importa
+
+Se o objeto salvo **não** aceita um `DataFrame` cru, é porque alguma
+transformação ficou fora do `Pipeline`. Isso vira bug no dia do deploy, não hoje.
+:::
+
+---
+
+## Cola para levar
+
+| Você quer | tidymodels | scikit-learn |
+| --- | --- | --- |
+| dividir | `initial_split()` | `train_test_split()` |
+| dividir por grupo | `group_initial_split()` | `train_test_split` nos grupos, ou `GroupShuffleSplit` |
+| receita | `recipe() + step_*()` | `ColumnTransformer` |
+| aprender a receita | `prep()` | `.fit()` |
+| aplicar a receita | `bake()` | `.transform()` |
+| lasso | `linear_reg(penalty, mixture = 1)` | `Lasso()` |
+| floresta | `rand_forest(trees, min_n)` | `RandomForestRegressor()` |
+| juntar | `workflow()` | `Pipeline()` |
+| dobras por grupo | `group_vfold_cv()` | `GroupKFold` |
+| marcar hiperparâmetro | `tune()` | `"passo__parametro"` |
+| buscar | `tune_grid()` | `GridSearchCV` |
+| escolher o melhor | `select_best()` | `.best_params_` |
+| reajustar | `finalize_workflow() + fit()` | `refit=True` |
+| R² tradicional | `rsq_trad()` | `r2_score()` |
+| salvar | `bundle()` | `joblib.dump()` |
+
+---
+
+## O que fica
+
+::: {.incremental}
+1. **`Pipeline` é `workflow`.** Se o pré-processamento não está lá dentro, ele
+   vai vazar em algum momento.
+2. **A mesma receita serviu ao lasso e à floresta.** Se a sua não serve, ela
+   está grudada no modelo.
+3. **A validação tem que imitar o uso.** Se o modelo vai ver linha nova, o teste
+   precisa ter linha nova: por isso `GroupKFold`.
+4. **Baseline sempre.** Uma linha de código evita comemorar um R² que não
+   significa nada.
+5. **O objeto salvo é o produto.** Ele recebe dado cru e devolve predição. Esse
+   é o contrato com a disciplina de Deploy.
+:::
+
+. . .
+
+Agora ao código: vamos construir isso do zero.

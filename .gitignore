@@ -1,0 +1,16 @@
+# ambiente
+comparacao/.venv/
+__pycache__/
+
+# caches de renderizacao (o HTML final entra no Git; os intermediarios nao)
+/.quarto/
+comparacao/.quarto/
+slides/.quarto/
+comparacao/*_files/
+slides/*_files/
+comparacao/*.knit.md
+comparacao/*.rmarkdown
+_site/
+
+# excel abre arquivo temporario ao lado do original
+~$*

@@ -1,0 +1,441 @@
+---
+title: "O mesmo modelo em scikit-learn"
+subtitle: "Lasso e floresta aleatória para a oferta de ônibus da SPTrans"
+author: "Lab 2: Prática Avançada em Data Science e Visualização, PADS Insper"
+lang: pt-BR
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-tools: true
+    embed-resources: true
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+jupyter: python3
+---
+
+::: {.callout-note}
+## Documento irmão
+
+Este arquivo tem um par idêntico em R, `tidymodels.qmd`. Mesma pergunta, mesmos
+dados, mesmos dois modelos, mesma sequência de seções. A ideia é abrir os dois
+lado a lado e ler a mesma etapa nas duas linguagens.
+:::
+
+## A pergunta e os dados
+
+Queremos prever o **headway**: o intervalo programado entre dois ônibus da mesma
+linha, em segundos. Cada registro é uma combinação de linha, sentido e faixa
+horária, montada a partir do GTFS da SPTrans cruzado com a API Olho Vivo.
+
+```{python}
+# | label: pacotes
+import numpy as np
+import pandas as pd
+from plotnine import *
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import Lasso
+from sklearn.metrics import mean_absolute_error, r2_score, root_mean_squared_error
+from sklearn.model_selection import GridSearchCV, GroupKFold, train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+SEMENTE = 42
+```
+
+```{python}
+# | label: dados
+dados = pd.read_csv("dados/viagens.csv.gz", low_memory=False)
+
+numericas = [
+    "hora_inicio",
+    "n_paradas",
+    "extensao_km",
+    "duracao_min",
+    "velocidade_kmh",
+    "paradas_por_km",
+    "dist_centro_origem_km",
+    "dist_centro_destino_km",
+    "n_linhas_origem",
+    "n_linhas_destino",
+    "pct_paradas_corredor",
+]
+categoricas = [
+    "periodo_dia",
+    "tipo_dia",
+    "sentido",
+    "area_operacao",
+    "tipo_linha",
+    "corredor_principal",
+]
+
+# CSV não guarda tipo: uma coluna categórica só com números volta como int e o
+# OneHotEncoder recusa a mistura. Em R, `factor` resolve isso sozinho.
+for coluna in categoricas:
+    dados[coluna] = dados[coluna].where(dados[coluna].isna(), dados[coluna].astype(str))
+
+X = dados[numericas + categoricas]
+y = dados["headway_seg"].astype(float)
+grupos = dados["route_id"]
+
+print(f"{len(dados):,} registros | {grupos.nunique():,} linhas de ônibus")
+print(f"faltantes em corredor_principal: {X['corredor_principal'].isna().mean():.0%}")
+```
+
+## Divisão treino e teste, por grupo
+
+Cada linha de ônibus aparece cerca de 30 vezes, uma por faixa horária. Se a
+mesma linha cair nos dois lados, o modelo decora a linha em vez de aprender o
+padrão de oferta. Por isso a divisão é **por grupo**.
+
+O `train_test_split` sozinho não resolve: ele **não tem** parâmetro `groups=`.
+Mas a ideia é simples o bastante para escrever à mão, e assim fica explícito o
+que "dividir por grupo" quer dizer: em vez de sortear **registros**, sorteamos
+**linhas de ônibus**.
+
+```{python}
+# | label: split
+linhas = dados["route_id"].unique()
+linhas_treino, _ = train_test_split(linhas, test_size=0.25, random_state=SEMENTE)
+
+e_treino = dados["route_id"].isin(linhas_treino)
+treino, teste = dados[e_treino], dados[~e_treino]
+
+X_treino, X_teste = treino[numericas + categoricas], teste[numericas + categoricas]
+y_treino, y_teste = treino["headway_seg"].astype(float), teste["headway_seg"].astype(float)
+g_treino = treino["route_id"]
+
+print(f"treino: {len(treino):,} registros de {g_treino.nunique():,} linhas")
+print(f"teste:  {len(teste):,} registros de {teste['route_id'].nunique():,} linhas")
+```
+
+::: {.callout-tip collapse="true"}
+## A forma canônica do scikit-learn (e por que ela parece estranha)
+
+A biblioteca tem um objeto pronto para isso, o `GroupShuffleSplit`. Ele é um
+**validador cruzado**, não uma função de divisão, então o seu método `.split()`
+devolve um **gerador** de pares de índices, um por repetição. Como aqui só
+queremos uma divisão, é preciso puxar o primeiro par com `next()`:
+
+```python
+divisor = GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=SEMENTE)
+i_treino, i_teste = next(divisor.split(X, y, groups=grupos))
+X_treino, X_teste = X.iloc[i_treino], X.iloc[i_teste]
+```
+
+As duas formas dão **exatamente o mesmo resultado**: por dentro, o
+`GroupShuffleSplit` embaralha os grupos únicos e corta, que é o que fizemos
+acima. A versão com `next()` é a que você vai encontrar na documentação e em
+código alheio, e é mais fácil de trocar por outro esquema de reamostragem. A
+versão com `isin()` é mais fácil de ler e devolve `DataFrame` em vez de vetor de
+índices, que é o que o `training()` e o `testing()` do R fazem.
+
+Para a **validação cruzada** não há alternativa simples: ali o `GroupKFold` é o
+caminho, porque o `GridSearchCV` espera um objeto com `.split()`.
+:::
+
+## A receita
+
+No scikit-learn a receita é um `ColumnTransformer`: um caminho por tipo de
+variável, cada caminho sendo ele mesmo um `Pipeline`.
+
+```{python}
+# | label: receita
+caminho_numerico = Pipeline(
+    [
+        ("imputar", SimpleImputer(strategy="median")),
+        ("padronizar", StandardScaler()),
+    ]
+)
+
+caminho_categorico = Pipeline(
+    [
+        ("imputar", SimpleImputer(strategy="constant", fill_value="desconhecido")),
+        (
+            "onehot",
+            OneHotEncoder(
+                handle_unknown="infrequent_if_exist",
+                min_frequency=20,
+                sparse_output=False,
+            ),
+        ),
+    ]
+)
+
+receita = ColumnTransformer(
+    [
+        ("num", caminho_numerico, numericas),
+        ("cat", caminho_categorico, categoricas),
+    ],
+    remainder="drop",
+    verbose_feature_names_out=False,
+)
+```
+
+Quatro decisões que valem para os dois modelos:
+
+- **mediana** para o que falta nas numéricas, porque resiste a valor extremo;
+- **padronizar**, porque o lasso penaliza coeficiente e sem escala comum ele
+  castiga quem tem unidade grande. A floresta não precisa disso, mas não se
+  incomoda;
+- **categoria explícita** para o que falta nas categóricas, em vez de descartar
+  a linha. Ficar sem corredor é informação;
+- **agrupar categoria rara** (`min_frequency=20`) e aceitar categoria nova
+  (`handle_unknown`), porque em produção aparece linha que não existia.
+
+::: {.callout-tip}
+## Duas diferenças escondidas na receita
+
+Este pré-processamento termina com **62 colunas** e o do R, com o mesmo dado,
+termina com **44**. Duas causas somadas:
+
+**O `OneHotEncoder` cria k colunas por categoria**, uma por nível. O
+`step_dummy()` do R cria k menos 1, deixando um nível de referência, que é o que
+uma regressão espera. Isso explica **6** colunas, uma por variável categórica.
+Se quiser o comportamento do R, use `drop="first"`.
+
+**`min_frequency` agrupa categoria rara por contagem absoluta** (20 registros),
+enquanto o `step_other()` do R agrupa por proporção (0,5%, ou 139 dos 27.768
+registros de treino). O corte do R é sete vezes mais agressivo, e explica as
+outras **12** colunas:
+
+| variável | níveis | Python (`min_frequency=20`) | R (`step_other` + `step_dummy`) |
+| --- | --- | --- | --- |
+| `periodo_dia` | 5 | 5 | 4 |
+| `tipo_dia` | 4 | 4 | 3 |
+| `sentido` | 2 | 2 | 1 |
+| `area_operacao` | 12 | 12 | 11 |
+| `tipo_linha` | 20 | 20 | **7** |
+| `corredor_principal` | 8 | 8 | 7 |
+| **colunas categóricas** | | **51** | **33** |
+| mais 11 numéricas | | **62** | **44** |
+
+Quase toda a diferença está em `tipo_linha`, que tem 20 níveis: 13 deles não
+chegam a 139 registros e, no R, viram um `other` só. Nenhum dos dois
+comportamentos está errado; o errado seria não saber que a receita juntou treze
+categorias numa.
+:::
+
+```{python}
+# | label: espiar-receita
+espiada = receita.fit_transform(X_treino)
+print(f"{espiada.shape[1]} colunas depois do pré-processamento")
+print(list(receita.get_feature_names_out()[:12]), "...")
+```
+
+::: {.callout-warning}
+Este `fit_transform` acima é só para **olhar** o resultado. Ele não é usado no
+ajuste: quem vai chamar `fit` na receita é o `Pipeline`, dentro de cada dobra da
+validação cruzada. Rodar a receita na base inteira antes de dividir é o
+vazamento mais comum que existe.
+:::
+
+## Modelo 1: lasso
+
+```{python}
+# | label: lasso
+fluxo_lasso = Pipeline(
+    [
+        ("receita", receita),
+        ("modelo", Lasso(random_state=SEMENTE, max_iter=10_000)),
+    ]
+)
+
+busca_lasso = GridSearchCV(
+    fluxo_lasso,
+    param_grid={"modelo__alpha": [0.1, 1.0, 10.0, 100.0]},
+    cv=GroupKFold(n_splits=5),
+    scoring="neg_mean_absolute_error",
+    n_jobs=-1,
+)
+busca_lasso.fit(X_treino, y_treino, groups=g_treino)
+
+print("melhor alpha:", busca_lasso.best_params_["modelo__alpha"])
+print(f"MAE na validação cruzada: {-busca_lasso.best_score_:.1f} s")
+```
+
+O lasso zera coeficiente, então ele também seleciona variável. Dá para ver
+quais sobreviveram:
+
+```{python}
+# | label: coeficientes
+lasso_final = busca_lasso.best_estimator_
+coeficientes = (
+    pd.DataFrame(
+        {
+            "variavel": lasso_final["receita"].get_feature_names_out(),
+            "coeficiente": lasso_final["modelo"].coef_,
+        }
+    )
+    .assign(tamanho=lambda d: d["coeficiente"].abs())
+    .sort_values("tamanho", ascending=False)
+)
+
+zerados = (coeficientes["coeficiente"] == 0).sum()
+print(f"{zerados} de {len(coeficientes)} coeficientes foram zerados pelo lasso")
+coeficientes.head(10)[["variavel", "coeficiente"]]
+```
+
+## Modelo 2: floresta aleatória
+
+```{python}
+# | label: floresta
+fluxo_floresta = Pipeline(
+    [
+        ("receita", receita),
+        ("modelo", RandomForestRegressor(n_estimators=200, random_state=SEMENTE, n_jobs=1)),
+    ]
+)
+
+busca_floresta = GridSearchCV(
+    fluxo_floresta,
+    param_grid={"modelo__min_samples_leaf": [5, 20]},
+    cv=GroupKFold(n_splits=5),
+    scoring="neg_mean_absolute_error",
+    n_jobs=-1,
+)
+busca_floresta.fit(X_treino, y_treino, groups=g_treino)
+
+print("melhor min_samples_leaf:", busca_floresta.best_params_["modelo__min_samples_leaf"])
+print(f"MAE na validação cruzada: {-busca_floresta.best_score_:.1f} s")
+```
+
+Repare que **a receita é a mesma**. Trocar de modelo trocou uma linha do
+`Pipeline` e o dicionário do grid. É essa separação que faz o de-para com o
+`workflow()` do R valer a pena.
+
+## Comparação no teste
+
+```{python}
+# | label: comparacao
+def avaliar(nome, estimador):
+    linhas = []
+    for particao, X_p, y_p in (
+        ("treino", X_treino, y_treino),
+        ("teste", X_teste, y_teste),
+    ):
+        pred = estimador.predict(X_p)
+        linhas.append(
+            {
+                "modelo": nome,
+                "particao": particao,
+                "mae": mean_absolute_error(y_p, pred),
+                "rmse": root_mean_squared_error(y_p, pred),
+                "rsq": r2_score(y_p, pred),
+            }
+        )
+    return linhas
+
+
+mediana_treino = y_treino.median()
+baseline = [
+    {
+        "modelo": "baseline (mediana)",
+        "particao": particao,
+        "mae": mean_absolute_error(y_p, np.full(len(y_p), mediana_treino)),
+        "rmse": root_mean_squared_error(y_p, np.full(len(y_p), mediana_treino)),
+        "rsq": r2_score(y_p, np.full(len(y_p), mediana_treino)),
+    }
+    for particao, y_p in (("treino", y_treino), ("teste", y_teste))
+]
+
+resultados = pd.DataFrame(
+    baseline + avaliar("lasso", lasso_final) + avaliar("floresta", busca_floresta.best_estimator_)
+)
+resultados.round(3)
+```
+
+```{python}
+# | label: fig-comparacao
+# | fig-cap: "Erro médio absoluto no teste, em minutos."
+(
+    ggplot(
+        resultados.query("particao == 'teste'"),
+        aes("reorder(modelo, -mae)", "mae / 60"),
+    )
+    + geom_col(fill="#2c7fb8")
+    + coord_flip()
+    + labs(
+        title="Lasso, floresta e o chute constante",
+        subtitle="Menor é melhor. Dados de teste, linhas que o modelo nunca viu.",
+        x="",
+        y="MAE (minutos)",
+    )
+    + theme_minimal()
+)
+```
+
+```{python}
+# | label: fig-ajuste
+# | fig-cap: "Observado contra predito, floresta aleatória, dados de teste."
+comparacao = pd.DataFrame(
+    {
+        "observado": y_teste.to_numpy() / 60,
+        "predito": busca_floresta.best_estimator_.predict(X_teste) / 60,
+    }
+)
+
+(
+    ggplot(comparacao, aes("observado", "predito"))
+    + geom_point(alpha=0.12, size=0.8)
+    + geom_abline(intercept=0, slope=1, linetype="dashed", color="#d95f02")
+    + labs(
+        title="O modelo acerta o meio da distribuição e erra as pontas",
+        x="Observado (minutos)",
+        y="Predito (minutos)",
+    )
+    + theme_minimal()
+)
+```
+
+## O que ler nessa tabela
+
+1. **Os dois modelos ganham do baseline**, mas por pouco. O gargalo não é o
+   algoritmo, são os dados: falta demanda, falta contrato de operação.
+2. **A floresta ganha do lasso no teste**, e ganha muito mais no treino. Essa
+   distância entre treino e teste é sobreajuste, e é o preço de um modelo
+   flexível.
+3. **O R² do baseline é negativo.** Não é bug: o R² compara com prever a
+   *média*, e o baseline prevê a *mediana*, que é o chute constante certo sob
+   MAE. Métrica e baseline precisam ser escolhidos juntos.
+
+::: {.callout-important}
+## Se for comparar com o relatório em R
+
+O `r2_score` do scikit-learn é `1 - SQE/SQT` e pode ficar negativo. O
+`yardstick::rsq()` do R é o **quadrado da correlação**, e com um baseline
+constante devolve `NA`. O equivalente exato do `r2_score` é o
+`yardstick::rsq_trad()`. Quando os R² de dois relatórios não batem, é aqui que
+costuma estar a diferença.
+:::
+
+::: {.callout-tip}
+## Diferenças com o repositório do lab
+
+O repositório `lab2-sptrans` faz duas coisas a mais que este documento:
+modela o alvo em escala logarítmica, com `TransformedTargetRegressor`, e usa
+`HistGradientBoostingRegressor` como padrão. Aqui ficamos no lasso e na floresta
+para a comparação com o R ficar direta.
+:::
+
+## Salvar o modelo
+
+```{python}
+# | label: salvar
+# | eval: false
+import joblib
+
+joblib.dump(busca_floresta.best_estimator_, "modelo_floresta.joblib")
+
+# em produção, o objeto recebe DataFrame cru e devolve predição:
+modelo = joblib.load("modelo_floresta.joblib")
+modelo.predict(X_teste.head())
+```
+
+Se o objeto salvo **não** aceitar um `DataFrame` cru, é sinal de que alguma
+transformação ficou fora do `Pipeline`. Esse é o teste que separa um modelo que
+vai para produção de um que só funciona no notebook.

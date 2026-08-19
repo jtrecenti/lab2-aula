@@ -1,0 +1,404 @@
+---
+title: "O mesmo modelo em tidymodels"
+subtitle: "Lasso e floresta aleatória para a oferta de ônibus da SPTrans"
+author: "Lab 2: Prática Avançada em Data Science e Visualização, PADS Insper"
+lang: pt-BR
+format:
+  html:
+    toc: true
+    toc-depth: 2
+    code-tools: true
+    embed-resources: true
+    theme: cosmo
+execute:
+  warning: false
+  message: false
+---
+
+::: {.callout-note}
+## Documento irmão
+
+Este arquivo tem um par idêntico em Python, `sklearn.qmd`. Mesma pergunta,
+mesmos dados, mesmos dois modelos, mesma sequência de seções. A ideia é abrir os
+dois lado a lado e ler a mesma etapa nas duas linguagens.
+
+Os números não batem na casa decimal entre os dois documentos: os geradores de
+números aleatórios de R e Python são diferentes, então a divisão treino e teste
+não é exatamente a mesma. A ordem de grandeza e a conclusão são.
+:::
+
+## A pergunta e os dados
+
+Queremos prever o **headway**: o intervalo programado entre dois ônibus da mesma
+linha, em segundos. Cada registro é uma combinação de linha, sentido e faixa
+horária, montada a partir do GTFS da SPTrans cruzado com a API Olho Vivo.
+
+```{r}
+#| label: pacotes
+library(tidymodels)
+library(readr)
+library(dplyr)
+
+set.seed(42)
+tidymodels_prefer()
+```
+
+```{r}
+#| label: dados
+dados <- read_csv("dados/viagens.csv.gz", show_col_types = FALSE)
+
+numericas <- c(
+  "hora_inicio", "n_paradas", "extensao_km", "duracao_min",
+  "velocidade_kmh", "paradas_por_km", "dist_centro_origem_km",
+  "dist_centro_destino_km", "n_linhas_origem", "n_linhas_destino",
+  "pct_paradas_corredor"
+)
+categoricas <- c(
+  "periodo_dia", "tipo_dia", "sentido", "area_operacao",
+  "tipo_linha", "corredor_principal"
+)
+
+dados <- dados |>
+  select(route_id, headway_seg, all_of(numericas), all_of(categoricas)) |>
+  mutate(across(all_of(categoricas), as.factor))
+
+glue::glue(
+  "{format(nrow(dados), big.mark = '.')} registros | ",
+  "{n_distinct(dados$route_id)} linhas de ônibus"
+)
+mean(is.na(dados$corredor_principal))
+```
+
+Repare no `as.factor`: em R basta declarar que a coluna é categórica e o resto
+do ecossistema entende. Em Python, o `OneHotEncoder` recusa uma coluna que
+misture `int` e `str`, e é preciso converter na mão depois de ler o CSV.
+
+## Divisão treino e teste, por grupo
+
+Cada linha de ônibus aparece cerca de 30 vezes, uma por faixa horária. Se a
+mesma linha cair nos dois lados, o modelo decora a linha em vez de aprender o
+padrão de oferta. Por isso a divisão é **por grupo**.
+
+```{r}
+#| label: split
+divisao <- group_initial_split(dados, group = route_id, prop = 0.75)
+treino <- training(divisao)
+teste <- testing(divisao)
+
+dobras <- group_vfold_cv(treino, group = route_id, v = 5)
+
+glue::glue(
+  "treino: {nrow(treino)} registros de {n_distinct(treino$route_id)} linhas\n",
+  "teste:  {nrow(teste)} registros de {n_distinct(teste$route_id)} linhas"
+)
+```
+
+Uma diferença de forma: aqui o `group_initial_split()` devolve **um objeto** de
+onde saem treino e teste; o `GroupShuffleSplit` do Python devolve índices, e é
+você quem fatia. E o `route_id` viaja **dentro** do `data.frame`, enquanto em
+Python o vetor `groups` viaja por fora e precisa ser passado em toda chamada.
+
+## A receita
+
+```{r}
+#| label: receita
+receita <- recipe(headway_seg ~ ., data = treino) |>
+  update_role(route_id, new_role = "id") |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_normalize(all_numeric_predictors()) |>
+  step_unknown(all_nominal_predictors()) |>
+  step_novel(all_nominal_predictors()) |>
+  step_other(all_nominal_predictors(), threshold = 0.005) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors())
+
+receita
+```
+
+Quatro decisões que valem para os dois modelos:
+
+- **mediana** para o que falta nas numéricas, porque resiste a valor extremo;
+- **padronizar**, porque o lasso penaliza coeficiente e sem escala comum ele
+  castiga quem tem unidade grande. A floresta não precisa disso, mas não se
+  incomoda;
+- **categoria explícita** para o que falta nas categóricas (`step_unknown`), em
+  vez de descartar a linha. Ficar sem corredor é informação;
+- **agrupar categoria rara** (`step_other`) e aceitar categoria nova
+  (`step_novel`), porque em produção aparece linha que não existia.
+
+::: {.callout-tip}
+## Duas diferenças escondidas na receita
+
+Esta receita termina com **44 colunas** e a do Python, com o mesmo dado,
+termina com **62**. Duas causas somadas:
+
+**`step_dummy()` cria k menos 1 colunas**, deixando um nível como referência,
+que é o que uma regressão espera. O `OneHotEncoder` do Python cria as k, a menos
+que você peça `drop="first"`. Isso explica **6** colunas, uma por variável
+categórica.
+
+**`step_other()` agrupa por proporção** (`threshold = 0.005`, ou seja 139 dos
+27.768 registros de treino), enquanto o `min_frequency` do `OneHotEncoder`
+agrupa por contagem absoluta (20 registros). O corte daqui é sete vezes mais
+agressivo, e explica as outras **12** colunas:
+
+| variável | níveis | Python (`min_frequency=20`) | R (`step_other` + `step_dummy`) |
+| --- | --- | --- | --- |
+| `periodo_dia` | 5 | 5 | 4 |
+| `tipo_dia` | 4 | 4 | 3 |
+| `sentido` | 2 | 2 | 1 |
+| `area_operacao` | 12 | 12 | 11 |
+| `tipo_linha` | 20 | 20 | **7** |
+| `corredor_principal` | 8 | 8 | 7 |
+| **colunas categóricas** | | **51** | **33** |
+| mais 11 numéricas | | **62** | **44** |
+
+Quase toda a diferença está em `tipo_linha`, que tem 20 níveis: 13 deles não
+chegam a 139 registros e viram um `other` só. Nenhum dos dois comportamentos
+está errado; o errado seria não saber que a receita juntou treze categorias
+numa.
+:::
+
+::: {.callout-tip}
+## Ordem importa
+
+`step_normalize()` vem **antes** de `step_dummy()`. Se viesse depois,
+`all_numeric_predictors()` pegaria também as dummies recém-criadas e
+padronizaria colunas de zero e um. Em Python o problema não existe, porque cada
+caminho do `ColumnTransformer` recebe a sua própria lista de colunas.
+
+O `update_role()` também não tem equivalente direto: ele diz que `route_id` está
+no `data.frame` mas não é preditor. Em Python isso se resolve simplesmente não
+colocando a coluna em `X`.
+:::
+
+```{r}
+#| label: espiar-receita
+espiada <- receita |> prep() |> bake(new_data = NULL)
+glue::glue("{ncol(espiada) - 2} colunas depois do pré-processamento")
+names(espiada)[1:12]
+```
+
+::: {.callout-warning}
+Esse `prep()` acima é só para **olhar** o resultado. Ele não é usado no ajuste:
+quem vai chamar `prep()` na receita é o `workflow()`, dentro de cada dobra da
+validação cruzada. Rodar a receita na base inteira antes de dividir é o
+vazamento mais comum que existe.
+:::
+
+## Modelo 1: lasso
+
+```{r}
+#| label: lasso
+especificacao_lasso <- linear_reg(penalty = tune(), mixture = 1) |>
+  set_engine("glmnet") |>
+  set_mode("regression")
+
+fluxo_lasso <- workflow() |>
+  add_recipe(receita) |>
+  add_model(especificacao_lasso)
+
+grade_lasso <- tibble(penalty = c(0.1, 1, 10, 100))
+
+resultado_lasso <- tune_grid(
+  fluxo_lasso,
+  resamples = dobras,
+  grid = grade_lasso,
+  metrics = metric_set(mae, rmse, rsq_trad)
+)
+
+melhor_lasso <- select_best(resultado_lasso, metric = "mae")
+melhor_lasso
+
+collect_metrics(resultado_lasso) |>
+  filter(.metric == "mae") |>
+  select(penalty, mean, std_err)
+```
+
+O `mixture = 1` é o que faz do `linear_reg()` um lasso: mistura pura de L1. Com
+`mixture = 0` seria ridge, e entre 0 e 1, elastic net. Em Python são três
+classes diferentes (`Lasso`, `Ridge`, `ElasticNet`).
+
+O lasso zera coeficiente, então ele também seleciona variável:
+
+```{r}
+#| label: coeficientes
+lasso_final <- fluxo_lasso |>
+  finalize_workflow(melhor_lasso) |>
+  fit(data = treino)
+
+coeficientes <- lasso_final |>
+  extract_fit_parsnip() |>
+  tidy() |>
+  filter(term != "(Intercept)") |>
+  mutate(tamanho = abs(estimate)) |>
+  arrange(desc(tamanho))
+
+glue::glue(
+  "{sum(coeficientes$estimate == 0)} de {nrow(coeficientes)} ",
+  "coeficientes foram zerados pelo lasso"
+)
+
+coeficientes |> select(term, estimate) |> head(10)
+```
+
+## Modelo 2: floresta aleatória
+
+```{r}
+#| label: floresta
+especificacao_floresta <- rand_forest(trees = 200, min_n = tune()) |>
+  set_engine("ranger", seed = 42) |>
+  set_mode("regression")
+
+fluxo_floresta <- workflow() |>
+  add_recipe(receita) |>
+  add_model(especificacao_floresta)
+
+resultado_floresta <- tune_grid(
+  fluxo_floresta,
+  resamples = dobras,
+  grid = tibble(min_n = c(5, 20)),
+  metrics = metric_set(mae, rmse, rsq_trad)
+)
+
+melhor_floresta <- select_best(resultado_floresta, metric = "mae")
+melhor_floresta
+
+floresta_final <- fluxo_floresta |>
+  finalize_workflow(melhor_floresta) |>
+  fit(data = treino)
+```
+
+Repare que **a receita é a mesma**. Trocar de modelo trocou o `add_model()` e a
+grade. É exatamente o que acontece do outro lado, trocando um passo do
+`Pipeline` e o dicionário do grid.
+
+`min_n` no R é `min_samples_leaf` no Python, e `trees` é `n_estimators`. Os
+nomes dos hiperparâmetros são a parte mais chata da tradução: o `parsnip`
+padroniza os nomes entre motores, e o scikit-learn usa o nome de cada
+implementação.
+
+## Comparação no teste
+
+```{r}
+#| label: comparacao
+metricas <- metric_set(mae, rmse, rsq_trad)
+
+avaliar <- function(nome, ajustado) {
+  bind_rows(
+    treino |>
+      mutate(.pred = predict(ajustado, treino)$.pred) |>
+      metricas(truth = headway_seg, estimate = .pred) |>
+      mutate(particao = "treino"),
+    teste |>
+      mutate(.pred = predict(ajustado, teste)$.pred) |>
+      metricas(truth = headway_seg, estimate = .pred) |>
+      mutate(particao = "teste")
+  ) |>
+    mutate(modelo = nome)
+}
+
+mediana_treino <- median(treino$headway_seg)
+
+baseline <- bind_rows(
+  treino |>
+    mutate(.pred = mediana_treino) |>
+    metricas(truth = headway_seg, estimate = .pred) |>
+    mutate(particao = "treino"),
+  teste |>
+    mutate(.pred = mediana_treino) |>
+    metricas(truth = headway_seg, estimate = .pred) |>
+    mutate(particao = "teste")
+) |>
+  mutate(modelo = "baseline (mediana)")
+
+resultados <- bind_rows(
+  baseline,
+  avaliar("lasso", lasso_final),
+  avaliar("floresta", floresta_final)
+) |>
+  select(modelo, particao, .metric, .estimate) |>
+  tidyr::pivot_wider(names_from = .metric, values_from = .estimate)
+
+resultados |> mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+```{r}
+#| label: fig-comparacao
+#| fig-cap: "Erro médio absoluto no teste, em minutos."
+resultados |>
+  filter(particao == "teste") |>
+  ggplot(aes(x = reorder(modelo, -mae), y = mae / 60)) +
+  geom_col(fill = "#2c7fb8") +
+  coord_flip() +
+  labs(
+    title = "Lasso, floresta e o chute constante",
+    subtitle = "Menor é melhor. Dados de teste, linhas que o modelo nunca viu.",
+    x = NULL,
+    y = "MAE (minutos)"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+#| label: fig-ajuste
+#| fig-cap: "Observado contra predito, floresta aleatória, dados de teste."
+teste |>
+  mutate(.pred = predict(floresta_final, teste)$.pred) |>
+  ggplot(aes(x = headway_seg / 60, y = .pred / 60)) +
+  geom_point(alpha = 0.12, size = 0.8) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "#d95f02") +
+  labs(
+    title = "O modelo acerta o meio da distribuição e erra as pontas",
+    x = "Observado (minutos)",
+    y = "Predito (minutos)"
+  ) +
+  theme_minimal()
+```
+
+## O que ler nessa tabela
+
+1. **Os dois modelos ganham do baseline**, mas por pouco. O gargalo não é o
+   algoritmo, são os dados: falta demanda, falta contrato de operação.
+2. **A floresta ganha do lasso no teste**, e ganha muito mais no treino. Essa
+   distância entre treino e teste é sobreajuste, e é o preço de um modelo
+   flexível.
+3. **O R² do baseline é negativo.** Não é bug: o R² compara com prever a
+   *média*, e o baseline prevê a *mediana*, que é o chute constante certo sob
+   MAE. Métrica e baseline precisam ser escolhidos juntos.
+
+::: {.callout-important}
+## `rsq` e `rsq_trad` não são a mesma coisa
+
+Este documento usa `rsq_trad()`, não `rsq()`. O `yardstick::rsq()` é o
+**quadrado da correlação** entre observado e predito; com um baseline constante
+a correlação não existe e ele devolve `NA`. O `rsq_trad()` é o R² tradicional,
+`1 - SQE/SQT`, que é exatamente o que o `r2_score` do scikit-learn calcula, e
+que pode ficar negativo.
+
+Se você comparar um relatório em R e um em Python e os R² não baterem, é aqui
+que costuma estar a diferença.
+:::
+
+## Salvar o modelo
+
+```{r}
+#| label: salvar
+#| eval: false
+library(bundle)
+
+floresta_final |>
+  bundle() |>
+  saveRDS("modelo_floresta.rds")
+
+modelo <- readRDS("modelo_floresta.rds") |> unbundle()
+predict(modelo, head(teste))
+```
+
+O `bundle()` existe porque muitos modelos de R guardam ponteiros para memória
+que não sobrevivem ao `saveRDS()` sozinho. Em Python, o `joblib.dump()` do
+`Pipeline` resolve o caso equivalente sem embrulho extra.
+
+Se o objeto salvo **não** aceitar um `data.frame` cru, é sinal de que alguma
+transformação ficou fora do `workflow()`. Esse é o teste que separa um modelo
+que vai para produção de um que só funciona no notebook.
