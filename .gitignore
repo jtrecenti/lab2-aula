@@ -12,5 +12,9 @@ comparacao/*.knit.md
 comparacao/*.rmarkdown
 _site/
 
+# gerados pelo workflow do Pages, nao versionados
+site/index.html
+exercicios.html
+
 # excel abre arquivo temporario ao lado do original
 ~$*

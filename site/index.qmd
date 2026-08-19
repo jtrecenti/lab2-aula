@@ -1,0 +1,70 @@
+---
+title: "Lab 2: pipelines com scikit-learn"
+subtitle: "Prática Avançada em Data Science e Visualização, PADS Insper"
+lang: pt-BR
+format:
+  html:
+    toc: false
+    embed-resources: true
+    theme: cosmo
+---
+
+Material do Laboratório 2, de 21 de agosto de 2026. O tema é sair do notebook
+solto e chegar a um fluxo de modelagem que sobrevive fora da sua máquina:
+pré-processamento dentro do `Pipeline`, validação que imita o uso do modelo,
+baseline honesto e modelo serializado.
+
+O problema é a **oferta de ônibus da SPTrans**: quanto tempo passa entre dois
+ônibus da mesma linha, e o que explica isso.
+
+## Aula
+
+[**Slides: de tidymodels para scikit-learn**](slides.html)
+: A ponte entre o que vocês já sabem em R e o scikit-learn, com dois modelos
+  concretos (lasso e floresta aleatória) sobre a base da SPTrans.
+
+[**Exercícios**](exercicios.html)
+: Do aquecimento ao desafio. Partem do repositório construído em aula.
+
+## O mesmo modelo, nas duas linguagens
+
+Dois documentos irmãos: mesma pergunta, mesmos dados, mesmos dois modelos, mesma
+sequência de seções. Servem para abrir lado a lado.
+
+[**Em tidymodels (R)**](tidymodels.html)  |  [**Em scikit-learn (Python)**](sklearn.html)
+
+Resultado no conjunto de teste, em linhas de ônibus que o modelo nunca viu:
+
+| modelo | MAE (R) | MAE (Python) | R² (R) | R² (Python) |
+| --- | --- | --- | --- | --- |
+| baseline (mediana) | 690 s | 667 s | -0,26 | -0,22 |
+| lasso | 589 s | 594 s | 0,28 | 0,25 |
+| floresta aleatória | 574 s | 562 s | 0,31 | 0,27 |
+
+Os números não batem na casa decimal porque os geradores de números aleatórios
+de R e Python são diferentes, então a divisão treino e teste não é a mesma. A
+ordem de grandeza e a conclusão são.
+
+## A base
+
+[**Dicionário da base, em Excel**](dicionario-viagens.xlsx)
+: As 33 colunas com papel, unidade, faltantes e origem; os níveis de cada
+  categórica; e um Leia-me com o que é uma linha da tabela e três cuidados que
+  mudam a leitura dos resultados.
+
+Uma linha da tabela é **uma linha de ônibus, num sentido, numa faixa de horário
+do dia**: 37.357 registros, 1.142 linhas. As fontes são o GTFS estático da
+SPTrans e a API Olho Vivo, cruzadas por proximidade geográfica.
+
+## Código
+
+[**`lab2-minimo`**](https://github.com/jtrecenti/lab2-minimo)
+: O que construímos do zero em aula. Dois módulos, cerca de 130 linhas, e o
+  ciclo completo: baixa o GTFS, monta a tabela, ajusta os modelos com validação
+  por grupo e salva o modelo. Tem integração contínua e
+  [um relatório que se publica sozinho](https://jtrecenti.github.io/lab2-minimo/).
+
+[**`lab2-sptrans`**](https://github.com/jtrecenti/lab2-sptrans)
+: A versão completa, de referência: cruzamento com a API Olho Vivo, mais
+  variáveis, relatório em Quarto, testes, integração contínua e coleta agendada.
+  É onde os exercícios levam.

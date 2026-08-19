@@ -1,0 +1,76 @@
+# Publica no GitHub Pages APENAS o material que é do aluno.
+#
+# Este repositório é privado, mas o site do Pages é público. Por isso o `_site`
+# é montado com uma lista explícita de arquivos, e não com uma cópia da pasta
+# inteira: `plano-de-aula.md` e `roteiro-demo.md` são material interno (têm
+# nomes de alunos, o link da planilha da turma e o que cortar se a aula
+# atrasar) e não podem sair daqui.
+#
+# Se você acrescentar um arquivo que deva ir para o site, acrescente uma linha
+# no passo "Montar o site". Esquecer é seguro: o arquivo simplesmente não
+# aparece. O contrário é que não seria.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# uma publicação por vez, sem cancelar a que já está no meio
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publicar:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: quarto-dev/quarto-actions/setup@v2
+
+      # os dois .md não têm bloco de código, então o Quarto renderiza sem
+      # precisar de Python nem de R instalados
+      - name: Renderizar a capa e os exercícios
+        run: |
+          quarto render site/index.qmd
+          quarto render exercicios.md --to html --embed-resources
+
+      - name: Montar o site
+        run: |
+          mkdir -p _site
+          cp site/index.html                          _site/index.html
+          cp exercicios.html                          _site/exercicios.html
+          cp slides/tidymodels-para-sklearn.html      _site/slides.html
+          cp comparacao/sklearn.html                  _site/sklearn.html
+          cp comparacao/tidymodels.html               _site/tidymodels.html
+          cp comparacao/dados/dicionario-viagens.xlsx _site/dicionario-viagens.xlsx
+
+      - name: Conferir que nada interno vazou
+        # rede de segurança: se um dia alguém copiar a pasta inteira sem
+        # pensar, o build falha em vez de publicar nome de aluno
+        run: |
+          if grep -rlE "Gabrielle|Leonardo Koga|docs\.google\.com/spreadsheets" _site; then
+            echo "::error::material interno encontrado no _site"
+            exit 1
+          fi
+          echo "ok: nenhum arquivo interno no _site"
+          ls -la _site
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Publicar
+        id: deploy
+        uses: actions/deploy-pages@v4

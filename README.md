@@ -6,6 +6,25 @@ Visualização** (PADS Insper, turma PADSONL08), 21 de agosto de 2026.
 O código fica em repositórios próprios; aqui ficam os slides, o roteiro, os
 exercícios e o par de documentos que compara R e Python.
 
+## O site da turma
+
+O material do aluno fica em <https://jtrecenti.github.io/lab2-aula/>.
+
+Este repositório é **privado**, mas o site do Pages é **público**. Por isso o
+`.github/workflows/pages.yml` monta o `_site` com uma **lista explícita** de
+arquivos, em vez de copiar a pasta inteira:
+
+| vai para o site | fica só aqui |
+| --- | --- |
+| capa, slides, exercícios | `plano-de-aula.md` (nomes de alunos, link da planilha da turma) |
+| os dois documentos de comparação | `roteiro-demo.md` (guião interno, o que cortar se atrasar) |
+| dicionário da base | |
+
+O workflow ainda roda uma conferência que **falha o build** se algum arquivo
+interno aparecer no `_site`. Se acrescentar material para a turma, acrescente
+uma linha no passo "Montar o site": esquecer só faz o arquivo não aparecer, e é
+esse o lado seguro de errar.
+
 ## Uma inconsistência de propósito
 
 Os repositórios de código deste laboratório ensinam que **arquivo gerado não
