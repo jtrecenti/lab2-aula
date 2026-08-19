@@ -18,3 +18,9 @@ exercicios.html
 
 # excel abre arquivo temporario ao lado do original
 ~$*
+
+# modelos serializados e notebooks intermediarios: sao gerados ao rodar os
+# documentos e nao entram no Git (um .joblib de floresta passa de 70 MB)
+*.joblib
+*.rds
+comparacao/*.ipynb
