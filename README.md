@@ -111,6 +111,17 @@ Os dados em `comparacao/dados/viagens.csv.gz` são a tabela analítica gerada pe
 `lab2-sptrans` (`uv run lab2 transform`), guardada aqui para os dois documentos
 rodarem sozinhos.
 
+A mesma tabela, congelada e com URL estável, está nos releases do repositório
+que a gera:
+
+```bash
+curl -LO https://github.com/jtrecenti/lab2-sptrans/releases/download/dados-20260819/viagens.csv.gz
+```
+
+É de lá que o aluno baixa, se precisar. O feed GTFS é republicado de tempos em
+tempos pela SPTrans, então rodar o pipeline hoje não devolve exatamente este
+arquivo.
+
 O **dicionário** está em `comparacao/dados/dicionario-viagens.xlsx`, com quatro
 abas:
 

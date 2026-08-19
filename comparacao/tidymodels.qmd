@@ -11,7 +11,8 @@ format:
     embed-resources: true
     theme: cosmo
 execute:
-  warning: false
+  # avisos ficam à vista de propósito: foi um aviso do `tune_grid` que
+  # denunciou a ordem errada dos passos da receita neste documento
   message: false
 ---
 
@@ -32,6 +33,7 @@ não é exatamente a mesma. A ordem de grandeza e a conclusão são.
 Queremos prever o **headway**: o intervalo programado entre dois ônibus da mesma
 linha, em segundos. Cada registro é uma combinação de linha, sentido e faixa
 horária, montada a partir do GTFS da SPTrans cruzado com a API Olho Vivo.
+
 
 ```{r}
 #| label: pacotes
@@ -73,6 +75,25 @@ Repare no `as.factor`: em R basta declarar que a coluna é categórica e o resto
 do ecossistema entende. Em Python, o `OneHotEncoder` recusa uma coluna que
 misture `int` e `str`, e é preciso converter na mão depois de ler o CSV.
 
+::: {.callout-important}
+## O `select()` acima não é arrumação, é proteção
+
+A tabela original tem 33 colunas, e três delas são identificadores de texto:
+`trip_id`, `route_short_name` e `route_long_name`. Se elas sobreviverem até a
+receita, o `recipe(headway_seg ~ .)` vai tratá-las como preditoras e criar
+milhares de dummies a partir de colunas que são praticamente únicas por linha.
+
+O sintoma aparece no `tune_grid`:
+
+```
+warning: There are new levels in `route_short_name`: "1012-10", "1016-10", ...
+```
+
+Se você vir esse aviso, o `select()` desta seção não rodou na sua sessão. Rode
+o documento do início. Aviso sobre nível novo em `tipo_linha` é normal e
+esperado (há linhas de trem e metrô raras); sobre `trip_id`, nunca é.
+:::
+
 ## Divisão treino e teste, por grupo
 
 Cada linha de ônibus aparece cerca de 30 vezes, uma por faixa horária. Se a
@@ -106,8 +127,8 @@ receita <- recipe(headway_seg ~ ., data = treino) |>
   update_role(route_id, new_role = "id") |>
   step_impute_median(all_numeric_predictors()) |>
   step_normalize(all_numeric_predictors()) |>
-  step_unknown(all_nominal_predictors()) |>
   step_novel(all_nominal_predictors()) |>
+  step_unknown(all_nominal_predictors()) |>
   step_other(all_nominal_predictors(), threshold = 0.005) |>
   step_dummy(all_nominal_predictors()) |>
   step_zv(all_predictors())
@@ -166,6 +187,12 @@ numa.
 `all_numeric_predictors()` pegaria também as dummies recém-criadas e
 padronizaria colunas de zero e um. Em Python o problema não existe, porque cada
 caminho do `ColumnTransformer` recebe a sua própria lista de colunas.
+
+`step_novel()` vem **antes** de `step_unknown()`. O `step_novel()` reserva um
+nível para categoria que só aparece depois do treino; o `step_unknown()` cuida
+do que está faltando. Na ordem trocada, o `recipes` avisa e converte o nível
+novo em `NA`, que já passou do ponto de ser tratado. O ecossistema do R avisa;
+vale ler o aviso.
 
 O `update_role()` também não tem equivalente direto: ele diz que `route_id` está
 no `data.frame` mas não é preditor. Em Python isso se resolve simplesmente não
