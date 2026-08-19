@@ -11,7 +11,12 @@ exercícios e o par de documentos que compara R e Python.
 Os repositórios de código deste laboratório ensinam que **arquivo gerado não
 entra no Git**. Aqui o HTML renderizado dos slides e dos dois documentos
 **entra**, porque ele é o produto: quem recebe este material abre o arquivo, não
-roda o Quarto. Os intermediários (`_files/`, `.quarto/`) continuam ignorados.
+roda o Quarto. Os intermediários (`.quarto/`, `.knit.md`) continuam ignorados.
+
+Para isso funcionar, os três documentos usam `embed-resources: true`, que gera
+**um arquivo só**, sem a pasta `_files` ao lado. Sem isso o HTML comitado abre
+quebrado em qualquer máquina que não seja a sua, porque as bibliotecas ficam de
+fora. Vale conferir sempre que for mandar um HTML para alguém.
 
 Vale saber quando a regra se aplica e quando não se aplica.
 

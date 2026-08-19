@@ -15,6 +15,9 @@ format:
     smaller: true
     scrollable: true
     code-line-numbers: false
+    # gera um HTML unico, sem a pasta _files ao lado: o arquivo viaja sozinho
+    # para o Blackboard, para o pen drive e para o repositorio
+    embed-resources: true
 lang: pt-BR
 ---
 
